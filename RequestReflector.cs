@@ -14,7 +14,7 @@ namespace ProxyService
         private byte[] clientBuf, serverBuf;
         private string hostName;
 
-        private bool isClosed;
+        private bool isClosed, isSecure;
 
         private object closingLock;
 
@@ -28,6 +28,7 @@ namespace ProxyService
             closingLock = new object();
 
             isClosed = false;
+            isSecure = false;
 
             const int bufSize = 4 * 1024;
 
@@ -39,6 +40,14 @@ namespace ProxyService
 
         private void ProcessRequest(int receivedBytes)
         {
+            // If using HTTPS, just forward packets
+            if (isSecure)
+            {
+               serverSocket.Send(clientBuf, receivedBytes, SocketFlags.None);
+
+                return;
+            }
+
             var memoryStream = new MemoryStream(clientBuf, 0, receivedBytes);
 
             var reader = new StreamReader(memoryStream, Encoding.ASCII);
@@ -49,6 +58,9 @@ namespace ProxyService
             string[] lines = message.Split(new string[] { "\r\n" }, StringSplitOptions.None);
 
             lines[0] = Utils.RemoveAbsoluteName(lines[0]);
+
+            if (lines[0].StartsWith("CONNECT"))
+                isSecure = true;
 
             string hostLine = null;
             for (int i = 1; i < lines.Length; ++i)
@@ -66,7 +78,7 @@ namespace ProxyService
             lock (ProxyService.logLock)
                 ProxyService.Log(hostName + " " + lines[0]);
 
-            int serverPort = 80;
+            int serverPort = isSecure ? 443 : 80;
 
             // Parse port if specified
             if (hostNameSplits.Length > 1)
@@ -75,7 +87,18 @@ namespace ProxyService
             try
             {
                 if (!serverSocket.Connected)
+                {
                     serverSocket.Connect(hostNameSplits[0], serverPort);
+
+                    if (isSecure)
+                    {
+                        byte[] okMessage = Encoding.ASCII.GetBytes("HTTP/1.1 200 Connection established\r\n\r\n");
+
+                        clientSocket.Send(okMessage);
+
+                        return;
+                    }
+                }
             }
             catch (Exception)
             {
@@ -141,7 +164,6 @@ namespace ProxyService
             catch (SocketException)
             {
                 // If connection closed, stop
-
                 TryClose();
             }
         }
